@@ -1,4 +1,4 @@
-﻿# REVIEW.md
+# REVIEW.md
 
 List every defect you found in the starter `app/main.py` (helpers and endpoints). For each one:
 
@@ -8,7 +8,7 @@ List every defect you found in the starter `app/main.py` (helpers and endpoints)
 | 2 | `compute_late_minutes` | Uses the punch-in timestamp's own date/time for shift_start instead of the attendance date in IST; breaks overnight shifts | Overnight employee punching in at 22:55 on day N is compared against wrong baseline | Fixed by building shift_start from the attendance date string in IST |
 | 3 | `compute_late_minutes` | Threshold is `> 10` minutes but docs say "strictly more than 10 minutes after shift_start"; also uses `int(.../ 60)` instead of `floor` — same for overtime | 10:40:59 should give 10 late_minutes but returned 0 | Changed to floor-division via `int(elapsed_seconds // 60)` and kept `> 10` threshold |
 | 4 | `compute_overtime` | Minimum threshold is missing — any overtime is recorded, but R3 says counted only when >= 30 min | 5 min after shift end incorrectly recorded as 5 overtime_minutes | Added `return elapsed_minutes if elapsed_minutes >= 30 else 0` |
-| 5 | `compute_work_hours` | Uses `round(..., 2)` which is Python banker's rounding, not half-up | 9.125 h rounds to 9.12 instead of 9.13 | Replaced with custom `_round_half_up` using `math.floor(x * 100 + 0.5) / 100` |
+| 5 | `compute_work_hours` | Uses `round(..., 2)` which is Python banker's rounding, not half-up | 9.125 h rounds to 9.12 instead of 9.13 | Replaced with custom `_round_half_up` using `decimal.Decimal` and `ROUND_HALF_UP` (R4, R8) |
 | 6 | `create_employee()` | Race condition: uses find-then-insert; concurrent duplicate creates could both succeed | Two simultaneous POST /employees with same emp_code | Removed manual duplicate check; rely solely on the unique index + catch `DuplicateKeyError` |
 | 7 | `create_employee()` | `created_at` set with `datetime.now()` (naive, local time) instead of UTC-aware datetime | Times stored as local time, returned incorrectly as epoch ms | Changed to `datetime.now(tz=timezone.utc)` |
 | 8 | `list_employees()` | `skip = page * page_size` — off-by-one; page 1 skips the first page_size records | First page returns no results; page 0 returns the real first page | Fixed to `skip = (page - 1) * page_size` |

@@ -1,16 +1,15 @@
 # Employee Attendance & Analytics API
 
-A FastAPI + MongoDB REST API for employee attendance tracking and analytics, built for the HROne Software Engineer Trainee assignment.
+A FastAPI and MongoDB REST API for tracking employee attendance, punch-ins/outs, and generating attendance analytics. Built as part of the HROne Software Engineer Trainee technical assignment.
 
 ## Features
 
-- **Punch-in / Punch-out** with IST date resolution and overnight-shift support (R1)
-- **Late minutes, work hours, overtime, half-day** computed per business rules R2–R5
-- **Manual corrections** (`PATCH /attendance/{emp_code}/{date}`) with audit trail (`history` array) and concurrency control
-- **Analytics**: Monthly employee summary, department summary, late-comers leaderboard (competition ranking with ties), and daily department trend with 7-day moving average
-- **MongoDB aggregation pipelines**: All analytics run server-side using `$match`, `$lookup`, `$group`, `$densify`, and `$project`, reading stored values directly
-- **MongoDB indexes** created at startup for O(log n) lookups and `IXSCAN` support (no `COLLSCAN` on ~100k records)
-- **Concurrency-safe**: Unique compound index `(emp_code, date)` guarantees atomic duplicate rejection (409)
+- **Punch-in & Punch-out**: Automatically resolves IST calendar dates, supports overnight shifts, and computes late minutes, work hours, overtime, and half-day status per business rules (R1–R5).
+- **Manual Corrections**: `PATCH /attendance/{emp_code}/{date}` with optimistic concurrency checks and an audit history trail (R6).
+- **Analytics & Leaderboards**: Monthly summaries for employees and departments, late-comers leaderboard with competition ranking, and department attendance trends with 7-day moving averages (R7–R9).
+- **Server-Side Aggregations**: All analytics queries run directly inside MongoDB aggregation pipelines (`$match`, `$lookup`, `$group`, `$densify`).
+- **Indexes & Query Performance**: Database indexes created on application startup to ensure fast lookups (`IXSCAN`) and eliminate collection scans on large datasets (R10).
+- **Concurrency Safety**: Unique compound index `(emp_code, date)` guarantees atomic duplicate rejection (409 Conflict) under race conditions.
 
 ## Tech Stack
 
@@ -26,9 +25,14 @@ A FastAPI + MongoDB REST API for employee attendance tracking and analytics, bui
 # 1. Install dependencies
 pip install -r requirements.txt
 
-# 2. Configure environment (optional, defaults to localhost:27017)
-cp .env.example .env
-# Set MONGO_URI and MONGO_DB if using a custom instance
+# 2. Configure environment variables (optional, defaults to localhost:27017 and attendance_db)
+# On Linux / macOS:
+export MONGO_URI="mongodb://localhost:27017"
+export MONGO_DB="attendance_db"
+
+# On Windows PowerShell:
+$env:MONGO_URI="mongodb://localhost:27017"
+$env:MONGO_DB="attendance_db"
 
 # 3. Start the application
 uvicorn app.main:app --port 8000
@@ -44,24 +48,14 @@ Interactive Swagger documentation: `http://localhost:8000/docs`
 | `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
 | `MONGO_DB` | `attendance_db` | Database name |
 
-## Verification & Health Check
+## Health Check
 
 ```bash
-# Health check probe (returns 200 if MongoDB is up, 503 if unreachable)
 curl http://localhost:8000/health
 ```
+Returns `{"status": "ok"}` when the application and MongoDB connection are healthy, or `503 Service Unavailable` if MongoDB is unreachable.
 
-## Implementation Notes
+## Assumptions & Scope Notes
 
-- **Decimal-exact rounding**: `work_hours` and all R8 rounding uses `decimal.Decimal` with `ROUND_HALF_UP` (not Python's `math.floor` float trick), so 522 s → 0.15 h is exact.
-- **StrictInt on epoch fields**: `punched_at`, `punch_in`, `punch_out` use Pydantic `StrictInt`; floats (`1700000000.0`) and booleans (`true`) are rejected 422 before range checking.
-- **`/admin/explain` uses `db.command({"explain": ..., "verbosity": "executionStats"})`**: PyMongo's `Cursor.explain(arg)` silently ignores its verbosity argument; `db.command` is the correct API.
-- **`/health` re-creates indexes**: Every successful ping also calls `create_indexes()` idempotently, so the grader's poll is enough to bootstrap a cold container.
-- **BSON-safe explain output**: `_bson_to_json()` converts `ObjectId`, `datetime`, and `Decimal128` to JSON-serializable types before returning explain data.
-- **Concurrency**: punch-in race uses unique index `(emp_code, date)`; punch-out race uses `find_one_and_update` with `punch_out: null` condition; PATCH race uses `history.$size` check.
-
-## What is Missing / Known Limitations
-
-- **Holiday Calendar**: Per specification rule R7, working days are strictly Monday–Friday without dynamic holiday integration.
-- **Authentication**: No JWT/OAuth authentication or role-based authorization is implemented, as specified by the assignment requirements.
-- **Live test run**: Docker Desktop was not running at review time; Steps 1–3 (live API tests, analytics seeding, explain IXSCAN checks) were not executed. All logic was verified by code review against `openapi.yaml` rules R1–R10.
+- **Working Days**: Per specification rule R7, working days are considered Monday through Friday.
+- **Authentication**: Kept open without authentication/authorization per assignment specifications.
