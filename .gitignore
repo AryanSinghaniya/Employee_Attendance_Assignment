@@ -1,0 +1,47 @@
+# Environment / Secrets — NEVER commit these
+.env
+.env*
+*.env
+secrets/
+
+# Assignment kit forbidden files (do not publish problem statement or raw specs)
+PROBLEM_STATEMENT.docx
+*.docx
+openapi.yaml
+DATA_MODEL.md
+sample_seed.py
+sample_data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+.eggs/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / OS
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# Pytest / coverage
+.pytest_cache/
+htmlcov/
+.coverage
+*.coveragerc
+
+# Logs
+*.log
