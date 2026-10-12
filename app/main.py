@@ -39,26 +39,29 @@ app = FastAPI(title="Employee Attendance & Analytics API", version="2.0.0")
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 def create_indexes():
-    # 1. Unique emp_code for O(log n) lookups and preventing duplicate employees
-    db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="emp_code_unique")
-    # 2. Compound index for department and joined_on filtering
-    db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="dept_joined_on")
-    # 3. Unique (emp_code, date) ensures exactly one attendance record per employee per day
-    db.attendance_logs.create_index(
-        [("emp_code", ASCENDING), ("date", ASCENDING)],
-        unique=True,
-        name="emp_date_unique",
-    )
-    # 4. Supports the GET /attendance sort (date DESC, emp_code ASC) with IXSCAN
-    db.attendance_logs.create_index(
-        [("date", DESCENDING), ("emp_code", ASCENDING)],
-        name="date_desc_emp_asc",
-    )
-    # 5. Supports monthly analytics and leaderboard filtering
-    db.attendance_logs.create_index(
-        [("date", ASCENDING), ("late_minutes", ASCENDING)],
-        name="date_late",
-    )
+    try:
+        # 1. Unique emp_code for O(log n) lookups and preventing duplicate employees
+        db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="emp_code_unique")
+        # 2. Compound index for department and joined_on filtering
+        db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="dept_joined_on")
+        # 3. Unique (emp_code, date) ensures exactly one attendance record per employee per day
+        db.attendance_logs.create_index(
+            [("emp_code", ASCENDING), ("date", ASCENDING)],
+            unique=True,
+            name="emp_date_unique",
+        )
+        # 4. Supports the GET /attendance sort (date DESC, emp_code ASC) with IXSCAN
+        db.attendance_logs.create_index(
+            [("date", DESCENDING), ("emp_code", ASCENDING)],
+            name="date_desc_emp_asc",
+        )
+        # 5. Supports monthly analytics and leaderboard filtering
+        db.attendance_logs.create_index(
+            [("date", ASCENDING), ("late_minutes", ASCENDING)],
+            name="date_late",
+        )
+    except Exception as err:
+        print(f"Startup index creation notice: {err}")
 
 
 # ---------------------------------------------------------------------------
