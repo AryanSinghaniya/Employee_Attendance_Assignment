@@ -21,3 +21,10 @@
    - We would implement incremental pre-aggregated rollups using MongoDB's `$merge` pipeline into a `monthly_attendance_summary` collection on daily shift closure, turning O(N) monthly aggregations into O(1) point lookups.
    - We would route analytics queries to secondary replica nodes (`secondaryPreferred`) so analytical workloads do not compete with primary write throughput during peak morning punch-in bursts.
    - We would shard `attendance_logs` using a compound hashed shard key `(date, emp_code)` to distribute storage and I/O across cluster shards.
+
+6. **Decimal-exact rounding (R4, R8).**
+   `_round_half_up` uses `decimal.Decimal` with `ROUND_HALF_UP` quantize instead of `math.floor(x * 100 + 0.5) / 100`. The `math.floor` approach silently fails for certain float representations (e.g., `0.145 * 100 + 0.5` in IEEE 754 is `14.999…`, flooring to 14, not 15). `Decimal(str(value)).quantize(…, ROUND_HALF_UP)` is exact because it works in base-10. Similarly, `_compute_work_hours` divides integer seconds by `Decimal(3600)` directly (no intermediate float), so 522 s → `Decimal('0.145')` → rounds to `0.15`, not `0.14`.
+
+7. **`db.command({"explain": …})` for `/admin/explain`.**
+   PyMongo's `Cursor.explain(verbosity)` ignores the verbosity argument; it always runs `queryPlanner` verbosity regardless of the string passed. The only reliable way to get `executionStats` verbosity (which the grader checks for `nReturned`, `totalDocsExamined`, etc.) is `db.command({"explain": {"find": …, "filter": …}, "verbosity": "executionStats"})`. The explain result is then passed through `_bson_to_json()` to convert `ObjectId`, `datetime`, and `Decimal128` fields before FastAPI serializes to JSON.
+

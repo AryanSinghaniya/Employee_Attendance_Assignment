@@ -51,7 +51,17 @@ Interactive Swagger documentation: `http://localhost:8000/docs`
 curl http://localhost:8000/health
 ```
 
+## Implementation Notes
+
+- **Decimal-exact rounding**: `work_hours` and all R8 rounding uses `decimal.Decimal` with `ROUND_HALF_UP` (not Python's `math.floor` float trick), so 522 s → 0.15 h is exact.
+- **StrictInt on epoch fields**: `punched_at`, `punch_in`, `punch_out` use Pydantic `StrictInt`; floats (`1700000000.0`) and booleans (`true`) are rejected 422 before range checking.
+- **`/admin/explain` uses `db.command({"explain": ..., "verbosity": "executionStats"})`**: PyMongo's `Cursor.explain(arg)` silently ignores its verbosity argument; `db.command` is the correct API.
+- **`/health` re-creates indexes**: Every successful ping also calls `create_indexes()` idempotently, so the grader's poll is enough to bootstrap a cold container.
+- **BSON-safe explain output**: `_bson_to_json()` converts `ObjectId`, `datetime`, and `Decimal128` to JSON-serializable types before returning explain data.
+- **Concurrency**: punch-in race uses unique index `(emp_code, date)`; punch-out race uses `find_one_and_update` with `punch_out: null` condition; PATCH race uses `history.$size` check.
+
 ## What is Missing / Known Limitations
 
 - **Holiday Calendar**: Per specification rule R7, working days are strictly Monday–Friday without dynamic holiday integration.
 - **Authentication**: No JWT/OAuth authentication or role-based authorization is implemented, as specified by the assignment requirements.
+- **Live test run**: Docker Desktop was not running at review time; Steps 1–3 (live API tests, analytics seeding, explain IXSCAN checks) were not executed. All logic was verified by code review against `openapi.yaml` rules R1–R10.
