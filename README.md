@@ -1,82 +1,59 @@
 # Employee Attendance & Analytics API
 
-A FastAPI and MongoDB REST API for employee attendance tracking and attendance analytics built with PyMongo.
+A FastAPI and MongoDB REST API for tracking employee attendance, punch-ins/outs and attendance analytics. Built for the HROne Software Engineer Trainee technical assignment. All code is in `app/main.py`.
 
-## Implemented Features
+## What is implemented
 
-- **Employees**: `POST /employees` (unique `emp_code`, validation), `GET /employees` (department filter, pagination per R10).
-- **Attendance**:
-  - `POST /attendance/punch-in`: IST date handling and overnight shift logic (R1), grace period and late calculation (R2), presence statuses (R6), unique `(emp_code, date)` constraint (409 Conflict on duplicate).
-  - `POST /attendance/punch-out`: Work hours calculation with half-up rounding (R4, R8), overtime calculation (R3), half-day flag (R5), 409 Conflict if already punched out.
-  - `GET /attendance`: Filter by `emp_code`, `date_from`, `date_to`, `status`, sorted by `date DESC, emp_code ASC` with pagination (R10).
-  - `PATCH /attendance/{emp_code}/{date}`: Regularization updating derived fields, appending immutable audit history with changed fields only, optimistic concurrency control.
-- **Analytics**:
-  - `GET /analytics/employees/{emp_code}/monthly`: Working days (Mon-Fri) taking join date into account (R7), present days (R5, R6), leave days, late count and minutes, overtime, attendance percentage (R8).
-  - `GET /analytics/departments/summary`: Department headcount including zero-log employees (R9), present days, average work hours (average of present records), late count/minutes, leave/on-duty counts.
-  - `GET /analytics/leaderboard/late`: Top late employees with standard competition ranking (1, 2, 2, 4) with limit applied after ranking and ties broken by `emp_code` ASC.
-  - `GET /analytics/departments/{department}/trend`: Daily attendance trend with MongoDB `$densify` gap filling, daily headcount (R9), attendance rate, and 7-day moving average (R8).
-- **Admin Explain**:
-  - `GET /admin/explain/{endpoint}`: MongoDB query execution plan with `executionStats` verbosity using `db.command()`, explaining the same aggregation pipelines used by the analytics endpoints.
-- **System**:
-  - `GET /health`: MongoDB ping probe (returns 200 on success, 503 on failure) and idempotent startup index creation.
+- `GET /health`: 200 if MongoDB answers a ping, otherwise 503.
+- `POST /employees`, `GET /employees`: unique `emp_code` (enforced by a unique index, 409 on duplicates), filtered `total`, pagination.
+- `POST /attendance/punch-in`, `POST /attendance/punch-out`: IST attendance date, overnight shifts, and late minutes, work hours, overtime and half day (R1-R5); 404 / 409 / 422 handling.
+- `GET /attendance`: sorted by `date` descending then `emp_code`, paginated.
+- `PATCH /attendance/{emp_code}/{date}`: manual correction. Recomputes derived fields, appends exactly one `history` entry with only the changed fields, and rejects a concurrent edit with 409 instead of losing history.
+- Analytics as MongoDB aggregation pipelines that read the stored values: employee monthly summary, department summary, late leaderboard (competition ranking with ties), department trend (`$densify`, 7-day moving average).
+- `GET /admin/explain/{endpoint}`: MongoDB `explain` with `executionStats`, run on the same pipelines the analytics endpoints use.
+- Indexes are created at startup (and retried from `/health` if MongoDB was not ready).
 
-## How to Run
+## Tech stack
 
-1. Install dependencies:
+Python 3.11+, FastAPI, PyMongo, Pydantic v2, MongoDB 6.0+ (`$densify` needs 5.1+).
+
+## Run
+
 ```bash
 pip install -r requirements.txt
-```
 
-2. Set environment variables and run:
-
-On Linux / macOS:
-```bash
+# Linux / macOS
 export MONGO_URI="mongodb://localhost:27017"
-export MONGO_DB="attendance_test"
+export MONGO_DB="attendance_db"
+# Windows PowerShell
+# $env:MONGO_URI="mongodb://localhost:27017"; $env:MONGO_DB="attendance_db"
+
 uvicorn app.main:app --port 8000
 ```
 
-On Windows PowerShell:
-```powershell
-$env:MONGO_URI="mongodb://localhost:27017"
-$env:MONGO_DB="attendance_test"
-uvicorn app.main:app --port 8000
-```
-
-Interactive API documentation is accessible at `http://localhost:8000/docs`.
-
-## Environment Variables
+A `.env` file also works; real environment variables take priority.
+Swagger UI: http://localhost:8000/docs
 
 | Variable | Default | Description |
 |---|---|---|
 | `MONGO_URI` | `mongodb://localhost:27017` | MongoDB connection string |
 | `MONGO_DB` | `attendance_db` | Database name |
 
-## Testing Status
+## Testing status
 
-I tested the implementation against local MongoDB on `attendance_test`:
+I ran these checks against a local MongoDB (database `attendance_test`) with a throwaway test script that is not part of this repository:
 
-1. **Functional Tests (88/88 passed)**:
-   - Health check probe (200 on DB ping, 503 on failure).
-   - Business rules: R1 overnight shift dates and punch-out, R2 late minutes (09:40:00 -> 0, 09:40:01 -> 10, 10:15:59 -> 45), R3 overtime (29 min -> 0, 30 min -> 30), R4 work hours decimal half-up rounding (522 sec -> 0.15 h), R5 half day (< 4.50 h).
-   - Schema contracts: Strict integer epoch ms validation (strings, floats, bools, seconds -> 422), no `_id` or `id` exposed, real calendar date validation (joined_on, date_from/date_to, trend from/to, patch date -> 422 for invalid calendar dates).
-   - Concurrency tests: 20 concurrent employee creates (exactly one 201, remainder 409), 20 concurrent punch-ins (exactly one 201, remainder 409), 20 concurrent punch-outs (exactly one 200, remainder 409, zero 404s), concurrent regularizations without lost history.
-   - Regularization: ABSENT/LEAVE clearing punches, history entry tracking with only changed fields, no-change -> 422.
-   - Analytics correctness: Mid-month joiners (R7), zero-log employees in headcount (R9), weekend records, tie ranking (1, 2, 2, 4) on leaderboard, orphan log handling.
-   - Explain validation: All five endpoints return HTTP 200 with `executionStats`, `IXSCAN` present, and no `COLLSCAN`.
+- Business rules: overnight shift dates (R1), late minutes (09:40:00 -> 0, 09:40:01 -> 10, 10:15:59 -> 45), overtime (29 min -> 0, 30 min -> 30), half-up work hours (522 seconds -> 0.15), half day.
+- Contract: epoch milliseconds everywhere, strict integers (string, float and bool epoch values -> 422), no `_id` in responses, invalid dates and statuses -> 422, 404 / 409 codes.
+- Concurrency with 20 threads: employee create, punch-in and punch-out each give exactly one success and the rest 409 (never 404); two simultaneous regularizations do not lose a history entry.
+- Regularize: one history entry with only the changed fields, ABSENT / LEAVE clear the punches, a request that changes nothing -> 422.
+- Analytics on a small hand-checked dataset: leaderboard ties (1, 2, 2, 4), employee with no logs counted in headcount, mid-month joiner, weekend records, orphan logs.
+- `/admin/explain` on about 100,000 attendance records and 300 employees: all five endpoints returned 200 with `IXSCAN` and no `COLLSCAN`. Endpoint response times were roughly 10-100 ms.
+- `/health` returns 503 when MongoDB is unreachable (checked by pointing the app at a closed port), and the app still starts.
 
-2. **Scale & Query Performance (~100,200 records)**:
-   - Seeded 300 employees and 100,200 attendance records spanning 2026.
-   - Verified `/admin/explain` on all five endpoints: all 5 return HTTP 200, `IXSCAN: True`, and `COLLSCAN: False` (including `$lookup` stages with 0 collection scans).
-   - Real endpoint response times on 100,200 records:
-     - `GET /attendance`: ~13 ms
-     - `GET /analytics/employees/{emp_code}/monthly`: ~10 ms
-     - `GET /analytics/departments/summary`: ~59 ms
-     - `GET /analytics/leaderboard/late`: ~103 ms
-     - `GET /analytics/departments/{department}/trend`: ~18 ms
+## Not done / limitations
 
-## Not Done / Limitations
-
-- **Authentication & Authorization**: Kept open without tokens or user roles per assignment specification.
-- **Dynamic Holiday Calendar**: Per business rule R7, working days are fixed to Monday through Friday without public holiday calendar lookups.
-- **Dynamic Shift Assignment**: Employees have fixed shift start and end times configured on the employee document.
+- No holiday calendar: working days are Monday to Friday (R7).
+- No authentication.
+- The tests are not included in this repository.
+- I did not test other MongoDB versions or datasets much larger than 100,000 records.

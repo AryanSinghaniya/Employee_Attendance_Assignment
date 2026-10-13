@@ -4,7 +4,6 @@ Employee Attendance & Analytics API
 Run:  uvicorn app.main:app --port 8000
 Env:  MONGO_URI, MONGO_DB  (read from .env or real environment variables)
 """
-import math
 import os
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
@@ -99,7 +98,7 @@ def _round_half_up(value: Optional[float], decimals: int) -> Optional[float]:
     if value is None:
         return None
     quantize_str = Decimal(10) ** -decimals  # e.g. Decimal('0.01') for decimals=2
-    return float(Decimal(str(value)).quantize(quantize_str, rounding=ROUND_HALF_UP))
+    return float(Decimal(str(round(value, 9))).quantize(quantize_str, rounding=ROUND_HALF_UP))
 
 
 def _bson_to_json(obj: Any) -> Any:
