@@ -45,6 +45,8 @@ def create_indexes():
         db.employees.create_index([("emp_code", ASCENDING)], unique=True, name="emp_code_unique")
         # 2. Compound index for department and joined_on filtering
         db.employees.create_index([("department", ASCENDING), ("joined_on", ASCENDING)], name="dept_joined_on")
+        # 2b. Standalone joined_on index for headcount queries without department filter
+        db.employees.create_index([("joined_on", ASCENDING)], name="joined_on_asc")
         # 3. Unique (emp_code, date) ensures exactly one attendance record per employee per day
         db.attendance_logs.create_index(
             [("emp_code", ASCENDING), ("date", ASCENDING)],
@@ -265,6 +267,15 @@ class EmployeeCreate(BaseModel):
     shift_end: str = Field("18:30", pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
     joined_on: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
 
+    @field_validator("joined_on")
+    @classmethod
+    def val_joined_on(cls, v: str):
+        try:
+            datetime.strptime(v, "%Y-%m-%d")
+        except ValueError:
+            raise ValueError("joined_on must be a valid calendar date YYYY-MM-DD")
+        return v
+
     @model_validator(mode="after")
     def shift_must_differ(self):
         if self.shift_start == self.shift_end:
@@ -419,6 +430,18 @@ def punch_out(body: PunchOutRequest):
         sort=[("punch_in", DESCENDING)],
     )
     if not record:
+        # Check if there is a matching record that is already punched out → 409 per spec.
+        # Only return 404 if no relevant record exists at all.
+        closed = db.attendance_logs.find_one(
+            {
+                "emp_code": body.emp_code,
+                "punch_in": {"$lte": punch_dt},
+                "status": {"$in": list(PRESENCE_STATUSES)},
+            },
+            sort=[("punch_in", DESCENDING)],
+        )
+        if closed and closed.get("punch_out") is not None:
+            raise HTTPException(409, detail="Record was already punched out")
         raise HTTPException(404, detail="No open punch-in found")
 
     pi = record["punch_in"]
@@ -463,8 +486,18 @@ def list_attendance(
     Lists attendance records sorted by date DESC, emp_code ASC.
     Uses cursor skip/limit/sort directly in MongoDB to stay fast on ~100k records.
     """
+    for d_val in (date_from, date_to):
+        if d_val:
+            try:
+                datetime.strptime(d_val, "%Y-%m-%d")
+            except ValueError:
+                raise HTTPException(422, detail="Invalid calendar date")
+
     if date_from and date_to and date_from > date_to:
         raise HTTPException(422, detail="date_from must be <= date_to")
+
+    if status and status not in ALL_STATUSES:
+        raise HTTPException(422, detail=f"status must be one of {sorted(ALL_STATUSES)}")
 
     q = {}
     if emp_code:
@@ -498,6 +531,11 @@ def regularize_attendance(emp_code: str, date: str, body: RegularizeRequest):
     - Appends exactly one history entry with changed fields only
     - Prevents concurrent edits from overwriting each other
     """
+    try:
+        datetime.strptime(date, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, detail="Invalid calendar date")
+
     emp = db.employees.find_one({"emp_code": emp_code})
     if not emp:
         raise HTTPException(404, detail="Employee not found")
@@ -609,29 +647,9 @@ def regularize_attendance(emp_code: str, date: str, body: RegularizeRequest):
 # Analytics Endpoints (MongoDB Aggregation Pipelines)
 # ---------------------------------------------------------------------------
 
-@app.get("/analytics/employees/{emp_code}/monthly")
-def employee_monthly(emp_code: str, month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
-    """
-    Monthly attendance summary for one employee backed by a MongoDB aggregation pipeline.
-    Reads stored values (late_minutes, overtime_minutes, half_day).
-    """
-    emp = db.employees.find_one({"emp_code": emp_code})
-    if not emp:
-        raise HTTPException(404, detail="Employee not found")
-
-    start_str, end_str = _month_range(month)
-
-    # Calculate calendar working days (Mon-Fri) from max(month_start, joined_on) to month_end (R7)
-    effective_start = max(start_str, emp["joined_on"])
-    if effective_start > end_str:
-        working_days = 0
-    else:
-        s_dt = datetime.strptime(effective_start, "%Y-%m-%d")
-        e_dt = datetime.strptime(end_str, "%Y-%m-%d")
-        working_days = sum(1 for i in range((e_dt - s_dt).days + 1) if (s_dt + timedelta(days=i)).weekday() < 5)
-
-    # MongoDB aggregation pipeline on attendance_logs
-    pipeline = [
+def _build_employee_monthly_pipeline(emp_code: str, start_str: str, end_str: str) -> list:
+    """Builds MongoDB aggregation pipeline for employee monthly summary."""
+    return [
         {"$match": {
             "emp_code": emp_code,
             "date": {"$gte": start_str, "$lte": end_str},
@@ -671,6 +689,29 @@ def employee_monthly(emp_code: str, month: str = Query(..., pattern=r"^\d{4}-(0[
         }},
     ]
 
+
+@app.get("/analytics/employees/{emp_code}/monthly")
+def employee_monthly(emp_code: str, month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$")):
+    """
+    Monthly attendance summary for one employee backed by a MongoDB aggregation pipeline.
+    Reads stored values (late_minutes, overtime_minutes, half_day).
+    """
+    emp = db.employees.find_one({"emp_code": emp_code})
+    if not emp:
+        raise HTTPException(404, detail="Employee not found")
+
+    start_str, end_str = _month_range(month)
+
+    # Calculate calendar working days (Mon-Fri) from max(month_start, joined_on) to month_end (R7)
+    effective_start = max(start_str, emp["joined_on"])
+    if effective_start > end_str:
+        working_days = 0
+    else:
+        s_dt = datetime.strptime(effective_start, "%Y-%m-%d")
+        e_dt = datetime.strptime(end_str, "%Y-%m-%d")
+        working_days = sum(1 for i in range((e_dt - s_dt).days + 1) if (s_dt + timedelta(days=i)).weekday() < 5)
+
+    pipeline = _build_employee_monthly_pipeline(emp_code, start_str, end_str)
     res = list(db.attendance_logs.aggregate(pipeline))
     if res:
         data = res[0]
@@ -700,39 +741,23 @@ def employee_monthly(emp_code: str, month: str = Query(..., pattern=r"^\d{4}-(0[
     }
 
 
-@app.get("/analytics/departments/summary")
-def department_summary(
-    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
-    department: Optional[str] = None,
-):
-    """
-    Department monthly summary via MongoDB aggregation pipeline across employees and attendance_logs.
-    - Headcount (R9) includes employees with joined_on <= end_of_month even if they have 0 logs.
-    - Departments with headcount 0 are omitted.
-    - avg_work_hours is the average across present records with work_hours (not avg of avgs).
-    """
-    start_str, end_str = _month_range(month)
-
+def _build_department_summary_pipeline(start_str: str, end_str: str, department: Optional[str] = None) -> list:
+    """Builds MongoDB aggregation pipeline for department summary."""
     emp_match = {"joined_on": {"$lte": end_str}}
     if department:
         emp_match["department"] = department
 
-    pipeline = [
+    return [
         {"$match": emp_match},
         {
             "$lookup": {
                 "from": "attendance_logs",
-                "let": {"emp_code": "$emp_code"},
+                "localField": "emp_code",
+                "foreignField": "emp_code",
                 "pipeline": [
                     {
                         "$match": {
-                            "$expr": {
-                                "$and": [
-                                    {"$eq": ["$emp_code", "$$emp_code"]},
-                                    {"$gte": ["$date", start_str]},
-                                    {"$lte": ["$date", end_str]},
-                                ]
-                            }
+                            "date": {"$gte": start_str, "$lte": end_str},
                         }
                     },
                     {
@@ -883,6 +908,20 @@ def department_summary(
         {"$sort": {"department": 1}},
     ]
 
+
+@app.get("/analytics/departments/summary")
+def department_summary(
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    department: Optional[str] = None,
+):
+    """
+    Department monthly summary via MongoDB aggregation pipeline across employees and attendance_logs.
+    - Headcount (R9) includes employees with joined_on <= end_of_month even if they have 0 logs.
+    - Departments with headcount 0 are omitted.
+    - avg_work_hours is the average across present records with work_hours (not avg of avgs).
+    """
+    start_str, end_str = _month_range(month)
+    pipeline = _build_department_summary_pipeline(start_str, end_str, department)
     raw_items = list(db.employees.aggregate(pipeline))
     items = []
     for row in raw_items:
@@ -901,20 +940,8 @@ def department_summary(
     return {"month": month, "items": items}
 
 
-@app.get("/analytics/leaderboard/late")
-def late_leaderboard(
-    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
-    limit: int = Query(10, ge=1, le=50),
-    department: Optional[str] = None,
-):
-    """
-    Ranks employees by total late_minutes in the month (only total > 0).
-    Standard competition ranking (1, 2, 2, 4) with limit applied after ranking.
-    Tied rows ordered by emp_code.
-    """
-    start_str, end_str = _month_range(month)
-
-    # Aggregation pipeline on attendance_logs
+def _build_late_leaderboard_pipeline(start_str: str, end_str: str, department: Optional[str] = None) -> list:
+    """Builds MongoDB aggregation pipeline for late leaderboard."""
     pipeline = [
         {
             "$match": {
@@ -956,7 +983,22 @@ def late_leaderboard(
         },
         {"$sort": {"total_late_minutes": -1, "emp_code": 1}},
     ])
+    return pipeline
 
+
+@app.get("/analytics/leaderboard/late")
+def late_leaderboard(
+    month: str = Query(..., pattern=r"^\d{4}-(0[1-9]|1[0-2])$"),
+    limit: int = Query(10, ge=1, le=50),
+    department: Optional[str] = None,
+):
+    """
+    Ranks employees by total late_minutes in the month (only total > 0).
+    Standard competition ranking (1, 2, 2, 4) with limit applied after ranking.
+    Tied rows ordered by emp_code.
+    """
+    start_str, end_str = _month_range(month)
+    pipeline = _build_late_leaderboard_pipeline(start_str, end_str, department)
     raw_candidates = list(db.attendance_logs.aggregate(pipeline))
 
     # Standard competition ranking: (1, 2, 2, 4)
@@ -986,32 +1028,9 @@ def late_leaderboard(
     return {"month": month, "items": items}
 
 
-@app.get("/analytics/departments/{department}/trend")
-def department_trend(
-    department: str,
-    from_: str = Query(..., alias="from"),
-    to: str = Query(...),
-):
-    """
-    Daily attendance trend for a department.
-    Uses MongoDB $densify gap-filling stage. Exactly one row per calendar day.
-    """
-    if to < from_:
-        raise HTTPException(422, detail="'to' must be >= 'from'")
-    from_dt = datetime.strptime(from_, "%Y-%m-%d")
-    to_dt = datetime.strptime(to, "%Y-%m-%d")
-    days = (to_dt - from_dt).days + 1
-    if days > 92:
-        raise HTTPException(422, detail="Date range cannot exceed 92 days")
-
-    if not db.employees.find_one({"department": department}):
-        raise HTTPException(404, detail="Department not found")
-
-    employees = list(db.employees.find({"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}))
-    emp_codes = [e["emp_code"] for e in employees]
-
-    # Pipeline groups existing logs, converts date to BSON Date, applies $densify, and defaults gaps
-    pipeline = [
+def _build_department_trend_pipeline(emp_codes: list, from_: str, to: str, from_dt: datetime, to_dt: datetime) -> list:
+    """Builds MongoDB aggregation pipeline with $densify for department trend."""
+    return [
         {
             "$match": {
                 "emp_code": {"$in": emp_codes},
@@ -1063,6 +1082,36 @@ def department_trend(
         },
         {"$sort": {"date": 1}},
     ]
+
+
+@app.get("/analytics/departments/{department}/trend")
+def department_trend(
+    department: str,
+    from_: str = Query(..., alias="from"),
+    to: str = Query(...),
+):
+    """
+    Daily attendance trend for a department.
+    Uses MongoDB $densify gap-filling stage. Exactly one row per calendar day.
+    """
+    try:
+        from_dt = datetime.strptime(from_, "%Y-%m-%d")
+        to_dt = datetime.strptime(to, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(422, detail="Invalid calendar date")
+    if to < from_:
+        raise HTTPException(422, detail="'to' must be >= 'from'")
+    days = (to_dt - from_dt).days + 1
+    if days > 92:
+        raise HTTPException(422, detail="Date range cannot exceed 92 days")
+
+    if not db.employees.find_one({"department": department}):
+        raise HTTPException(404, detail="Department not found")
+
+    employees = list(db.employees.find({"department": department}, {"_id": 0, "emp_code": 1, "joined_on": 1}))
+    emp_codes = [e["emp_code"] for e in employees]
+
+    pipeline = _build_department_trend_pipeline(emp_codes, from_, to, from_dt, to_dt)
 
     try:
         raw_rows = list(db.attendance_logs.aggregate(pipeline))
@@ -1172,6 +1221,17 @@ def explain_endpoint(
     collection_name = "attendance_logs"
 
     if endpoint == "attendance_list":
+        for d_val in (date_from, date_to):
+            if d_val:
+                try:
+                    datetime.strptime(d_val, "%Y-%m-%d")
+                except ValueError:
+                    raise HTTPException(422, detail="Invalid calendar date")
+        if date_from and date_to and date_from > date_to:
+            raise HTTPException(422, detail="date_from must be <= date_to")
+        if status and status not in ALL_STATUSES:
+            raise HTTPException(422, detail=f"status must be one of {sorted(ALL_STATUSES)}")
+
         q: dict = {}
         if emp_code:
             q["emp_code"] = emp_code
@@ -1197,22 +1257,18 @@ def explain_endpoint(
         if not emp_code or not month:
             raise HTTPException(422, detail="emp_code and month required")
         s, e = _month_range(month)
-        cmd = {
-            "find": "attendance_logs",
-            "filter": {"emp_code": emp_code, "date": {"$gte": s, "$lte": e}},
-        }
+        pipeline = _build_employee_monthly_pipeline(emp_code, s, e)
+        cmd = {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}
         explain = _run_explain(db.attendance_logs, cmd)
         return {"endpoint": endpoint, "collection": collection_name, "explain": explain}
 
     elif endpoint == "department_summary":
         if not month:
             raise HTTPException(422, detail="month required")
-        _, e = _month_range(month)
-        f: dict = {"joined_on": {"$lte": e}}
-        if department:
-            f["department"] = department
-        cmd = {"find": "employees", "filter": f}
+        s, e = _month_range(month)
         collection_name = "employees"
+        pipeline = _build_department_summary_pipeline(s, e, department)
+        cmd = {"aggregate": "employees", "pipeline": pipeline, "cursor": {}}
         explain = _run_explain(db.employees, cmd)
         return {"endpoint": endpoint, "collection": collection_name, "explain": explain}
 
@@ -1220,19 +1276,26 @@ def explain_endpoint(
         if not month:
             raise HTTPException(422, detail="month required")
         s, e = _month_range(month)
-        q2: dict = {"date": {"$gte": s, "$lte": e}, "late_minutes": {"$gt": 0}}
-        if department:
-            codes = [x["emp_code"] for x in db.employees.find({"department": department}, {"_id": 0, "emp_code": 1})]
-            q2["emp_code"] = {"$in": codes}
-        cmd = {"find": "attendance_logs", "filter": q2}
+        pipeline = _build_late_leaderboard_pipeline(s, e, department)
+        cmd = {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}
         explain = _run_explain(db.attendance_logs, cmd)
         return {"endpoint": endpoint, "collection": collection_name, "explain": explain}
 
     elif endpoint == "department_trend":
         if not department or not from_ or not to:
             raise HTTPException(422, detail="department, from, to required")
+        try:
+            from_dt = datetime.strptime(from_, "%Y-%m-%d")
+            to_dt = datetime.strptime(to, "%Y-%m-%d")
+        except ValueError:
+            raise HTTPException(422, detail="Invalid calendar date")
+        if to < from_:
+            raise HTTPException(422, detail="'to' must be >= 'from'")
+        days = (to_dt - from_dt).days + 1
+        if days > 92:
+            raise HTTPException(422, detail="Date range cannot exceed 92 days")
         codes = [x["emp_code"] for x in db.employees.find({"department": department}, {"_id": 0, "emp_code": 1})]
-        q3: dict = {"emp_code": {"$in": codes}, "date": {"$gte": from_, "$lte": to}}
-        cmd = {"find": "attendance_logs", "filter": q3}
+        pipeline = _build_department_trend_pipeline(codes, from_, to, from_dt, to_dt)
+        cmd = {"aggregate": "attendance_logs", "pipeline": pipeline, "cursor": {}}
         explain = _run_explain(db.attendance_logs, cmd)
         return {"endpoint": endpoint, "collection": collection_name, "explain": explain}
